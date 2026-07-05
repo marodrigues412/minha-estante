@@ -770,6 +770,11 @@ const langMap = {
   chi:'Chinês', zho:'Chinês', rus:'Russo'
 };
 
+const langMapGoogle = {
+  pt:'Português', en:'Inglês', es:'Espanhol', fr:'Francês',
+  de:'Alemão', it:'Italiano', ja:'Japonês', ko:'Coreano', zh:'Chinês', ru:'Russo'
+};
+
 async function loadBooks(){
   try{
     const { data, error } = await sb.from('livros').select('*').order('created_at', {ascending:true});
@@ -788,52 +793,87 @@ function uid(){ return 'b' + Date.now() + Math.random().toString(36).slice(2,7);
 document.getElementById('search-btn').addEventListener('click', doSearch);
 document.getElementById('search-input').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); doSearch(); }});
 
+async function searchOpenLibrary(q){
+  const url = 'https://openlibrary.org/search.json?q=' + encodeURIComponent(q) +
+    '&fields=title,author_name,first_publish_year,publisher,language,subject,subject_facet,cover_i&limit=6';
+  const r = await fetch(url);
+  const data = await r.json();
+  return (data.docs || []).map(doc => ({
+    title: doc.title || '',
+    author: (doc.author_name||[]).join(', '),
+    publisher: (doc.publisher||[])[0] || '',
+    language: langMap[(doc.language||[])[0]] || '',
+    genre: pickGenre(doc.subject, doc.subject_facet),
+    cover: doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : '',
+    extra: doc.first_publish_year || ''
+  }));
+}
+
+async function searchGoogleBooks(q){
+  const url = 'https://www.googleapis.com/books/v1/volumes?q=' + encodeURIComponent(q) + '&maxResults=6';
+  const r = await fetch(url);
+  const data = await r.json();
+  return (data.items || []).map(item=>{
+    const info = item.volumeInfo || {};
+    let cover = info.imageLinks ? (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail || '') : '';
+    if(cover) cover = cover.replace('http://', 'https://');
+    return {
+      title: info.title || '',
+      author: (info.authors||[]).join(', '),
+      publisher: info.publisher || '',
+      language: langMapGoogle[info.language] || '',
+      genre: pickGenre(info.categories),
+      cover,
+      extra: info.publishedDate ? info.publishedDate.slice(0,4) : ''
+    };
+  });
+}
+
 async function doSearch(){
   const q = document.getElementById('search-input').value.trim();
   const box = document.getElementById('search-results');
   if(!q){ box.innerHTML=''; return; }
   box.innerHTML = '<div class="hint">buscando...</div>';
-  try{
-    const url = 'https://openlibrary.org/search.json?q=' + encodeURIComponent(q) +
-      '&fields=title,author_name,first_publish_year,publisher,language,subject,subject_facet,cover_i&limit=6';
-    const r = await fetch(url);
-    const data = await r.json();
-    const docs = data.docs || [];
-    if(docs.length===0){ box.innerHTML = '<div class="hint">Nada encontrado — que tal cadastrar manualmente?</div>'; return; }
-    box.innerHTML = '';
-    docs.forEach(doc=>{
-      const cover = doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : '';
-      const author = (doc.author_name||[]).join(', ');
-      const item = document.createElement('div');
-      item.className='result-item';
-      item.innerHTML = `
-        ${cover ? `<img class="cover-thumb" style="width:42px;height:60px;border-radius:4px;" src="${cover}" alt="capa" onerror="handleCoverError(this)">` : `<div class="cover-thumb placeholder" style="width:42px;height:60px;border-radius:4px;"></div>`}
-        <div class="info">
-          <b>${escapeHtml(doc.title||'')}</b>
-          <span>${escapeHtml(author||'autor desconhecido')}${doc.first_publish_year ? ' · '+doc.first_publish_year : ''}</span>
-        </div>
-        <button type="button" class="btn-ghost btn-small">usar dados</button>
-      `;
-      item.querySelector('button').addEventListener('click', ()=> fillFromResult(doc, cover));
-      box.appendChild(item);
-    });
-  }catch(e){
-    box.innerHTML = '<div class="hint">Ops, não consegui buscar agora. Tente de novo em instantes.</div>';
+
+  const [olResult, gbResult] = await Promise.allSettled([searchOpenLibrary(q), searchGoogleBooks(q)]);
+  const olItems = olResult.status === 'fulfilled' ? olResult.value : [];
+  const gbItems = gbResult.status === 'fulfilled' ? gbResult.value : [];
+  const combined = [...olItems, ...gbItems].filter(item => item.title);
+
+  if(combined.length === 0){
+    box.innerHTML = olResult.status === 'rejected' && gbResult.status === 'rejected'
+      ? '<div class="hint">Ops, não consegui buscar agora. Tente de novo em instantes.</div>'
+      : '<div class="hint">Nada encontrado — que tal cadastrar manualmente?</div>';
+    return;
   }
+
+  box.innerHTML = '';
+  combined.forEach(data=>{
+    const item = document.createElement('div');
+    item.className='result-item';
+    item.innerHTML = `
+      ${data.cover ? `<img class="cover-thumb" style="width:42px;height:60px;border-radius:4px;" src="${data.cover}" alt="capa" onerror="handleCoverError(this)">` : `<div class="cover-thumb placeholder" style="width:42px;height:60px;border-radius:4px;"></div>`}
+      <div class="info">
+        <b>${escapeHtml(data.title)}</b>
+        <span>${escapeHtml(data.author||'autor desconhecido')}${data.extra ? ' · '+data.extra : ''}</span>
+      </div>
+      <button type="button" class="btn-ghost btn-small">usar dados</button>
+    `;
+    item.querySelector('button').addEventListener('click', ()=> fillFromResult(data));
+    box.appendChild(item);
+  });
 }
 
-function fillFromResult(doc, cover){
-  document.getElementById('f-title').value = doc.title || '';
-  document.getElementById('f-author').value = (doc.author_name||[]).join(', ');
-  document.getElementById('f-publisher').value = (doc.publisher||[])[0] || '';
-  const lang = (doc.language||[])[0];
-  document.getElementById('f-language').value = langMap[lang] || '';
-  const genre = pickGenre(doc.subject, doc.subject_facet);
-  document.getElementById('f-genre').value = genre || '';
-  document.getElementById('f-cover').value = cover || '';
+function fillFromResult(data){
+  document.getElementById('f-title').value = data.title || '';
+  document.getElementById('f-author').value = data.author || '';
+  document.getElementById('f-publisher').value = data.publisher || '';
+  document.getElementById('f-language').value = data.language || '';
+  document.getElementById('f-genre').value = data.genre || '';
+  document.getElementById('f-cover').value = data.cover || '';
   const preview = document.getElementById('cover-preview');
-  if(cover){
-    document.getElementById('cover-img').src = cover;
+  if(data.cover){
+    document.getElementById('cover-img').src = data.cover;
     preview.style.display='flex';
   } else {
     preview.style.display='none';
